@@ -1,314 +1,293 @@
+import os
+import joblib
 import pandas as pd
 import numpy as np
-import torch
-import torch.nn as nn
-from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence, pad_packed_sequence
-from sklearn.preprocessing import StandardScaler, RobustScaler
-from imblearn.over_sampling import SMOTE
-from imblearn.combine import SMOTEENN
+
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import RobustScaler
 from sklearn.metrics import classification_report, confusion_matrix
-import matplotlib.pyplot as plt
-import seaborn as sns
-from tqdm import tqdm
-import time
-import joblib
-import os
-from typing import Tuple, Optional
 
-class VariableLengthLSTM(nn.Module):
-    def __init__(self, input_size, hidden_size, num_layers, num_classes):
-        super(VariableLengthLSTM, self).__init__()
-        
-        # Detectar dimensiones automáticamente
-        self.num_features = input_size
-        
-        # Normalización y reducción de dimensionalidad
-        self.batch_norm = nn.BatchNorm1d(self.num_features)
-        self.feature_reducer = nn.Linear(self.num_features, self.num_features//2)
-        
-        # LSTM optimizado
-        self.lstm = nn.LSTM(
-            self.num_features//2,  # Entrada reducida
-            hidden_size, 
-            num_layers, 
-            batch_first=True,
-            bidirectional=True,
-            dropout=0.5
-        )
-        
-        # Capas fully connected mejoradas
-        self.fc_layers = nn.Sequential(
-            nn.Linear(hidden_size * 2, hidden_size),
-            nn.LeakyReLU(),
-            nn.Dropout(0.5),
-            nn.BatchNorm1d(hidden_size),
-            nn.Linear(hidden_size, hidden_size // 2),
-            nn.LeakyReLU(),
-            nn.Dropout(0.3),
-            nn.BatchNorm1d(hidden_size // 2),
-            nn.Linear(hidden_size // 2, num_classes)
-        )
-        
-    def forward(self, x, lengths):
-        # Asegurarnos que x tiene las dimensiones correctas
-        batch_size = x.size(0)
-        seq_length = x.size(1)
-        
-        # Reshape para batch norm
-        x = x.view(batch_size, -1)  # Aplanar para BatchNorm1d
-        x = self.batch_norm(x)
-        x = x.view(batch_size, seq_length, -1)  # Restaurar forma
-        
-        # Reducción de dimensionalidad
-        x = self.feature_reducer(x)
-        
-        # LSTM
-        packed_input = pack_padded_sequence(x, lengths, batch_first=True, enforce_sorted=False)
-        packed_output, (hn, cn) = self.lstm(packed_input)
-        
-        # Obtener último estado oculto
-        last_hidden = torch.cat((hn[-2], hn[-1]), dim=1)
-        out = self.fc_layers(last_hidden)
-        return out
+import torch
 
+###############################################################################
+# Clase principal: ModelPipeline
+###############################################################################
 class ModelPipeline:
     def __init__(self):
-        self.scaler = RobustScaler()
+        """
+        Aquí almacenamos en diccionarios los modelos y scalers para
+        cada (sensor, size), por ejemplo:
+          self.models['elf'][160]
+          self.models['mag'][320]
+          etc.
+        """
         self.models = {
-            'elf': None,
-            'mag': None
+            'elf': {},
+            'mag': {}
         }
+        self.scalers = {
+            'elf': {},
+            'mag': {}
+        }
+        # Para el caso de que uses un modelo con PyTorch (LSTM, etc.), 
+        # definimos un device. Si solo usas sklearn, esto no es esencial.
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        self.class_weights = None
+    
+    ############################################################################
+    # ------------------------- Cargar datos de subcarpetas --------------------
+    ############################################################################
+    def load_data_subfolders(self, base_dir='data'):
+        """
+        Estructura esperada:
+          data/
+           ├─ ELF/
+           │   ├─ 160/ (varios .csv)
+           │   ├─ 320/
+           │   └─ 480/
+           ├─ MAG/
+           │   ├─ 160/
+           │   ├─ 320/
+           │   └─ 480/
+
+        Retorna un dict:
+          {
+            160: (df_elf_160, df_mag_160),
+            320: (df_elf_320, df_mag_320),
+            480: (df_elf_480, df_mag_480)
+          }
+
+        Cada DataFrame resultante es la concatenación de todos los .csv 
+        que encuentre en esas subcarpetas.
+        """
+        sizes = [160, 320, 480]
+        data_dict = {}
+
+        print("\n=== CARGANDO DATOS DESDE SUBCARPETAS ===")
+        for size in sizes:
+            elf_path = os.path.join(base_dir, 'ELF', str(size))
+            mag_path = os.path.join(base_dir, 'MAG', str(size))
+
+            # ELF
+            elf_dfs = []
+            if os.path.exists(elf_path):
+                csv_elf = [f for f in os.listdir(elf_path) if f.endswith('.csv')]
+                print(f"[ELF][{size}] CSV encontrados: {len(csv_elf)}")
+                for csv_file in csv_elf:
+                    full_path = os.path.join(elf_path, csv_file)
+                    print(f"   Leyendo {full_path}")
+                    df_tmp = pd.read_csv(full_path)
+                    elf_dfs.append(df_tmp)
+                df_elf = pd.concat(elf_dfs, ignore_index=True) if elf_dfs else None
+            else:
+                print(f"[ELF][{size}] Carpeta no existe: {elf_path}")
+                df_elf = None
+
+            # MAG
+            mag_dfs = []
+            if os.path.exists(mag_path):
+                csv_mag = [f for f in os.listdir(mag_path) if f.endswith('.csv')]
+                print(f"[MAG][{size}] CSV encontrados: {len(csv_mag)}")
+                for csv_file in csv_mag:
+                    full_path = os.path.join(mag_path, csv_file)
+                    print(f"   Leyendo {full_path}")
+                    df_tmp = pd.read_csv(full_path)
+                    mag_dfs.append(df_tmp)
+                df_mag = pd.concat(mag_dfs, ignore_index=True) if mag_dfs else None
+            else:
+                print(f"[MAG][{size}] Carpeta no existe: {mag_path}")
+                df_mag = None
+
+            data_dict[size] = (df_elf, df_mag)
+
+        print("=== FIN CARGA DATOS ===\n")
+        return data_dict
+    
+    ############################################################################
+    # --------------------------- Entrenar y guardar ---------------------------
+    ############################################################################
+    def train_and_save_models(self, data_dir='data', model_out='model'):
+        """
+        1) Carga datos desde subcarpetas (ELF/160, MAG/160, etc.).
+        2) Entrena un RandomForest por cada (sensor, size).
+        3) Guarda los modelos y scalers en model_out/ELF/160, etc.
+        """
+        data_dict = self.load_data_subfolders(data_dir)
+
+        for size, (df_elf, df_mag) in data_dict.items():
+            print(f"\n--- PROCESANDO TAMAÑO: {size} ---")
+            # Entrenar para ELF
+            self.train_model(df_elf, 'elf', size)
+            # Entrenar para MAG
+            self.train_model(df_mag, 'mag', size)
         
-    def calculate_class_weights(self, y):
-        class_counts = torch.bincount(y)
-        total = len(y)
-        weights = total / (2.0 * class_counts)
-        return weights
+        # Guardar
+        self.save_models(model_out)
+    
+    def train_model(self, df, sensor_type, size):
+        """
+        Entrena un modelo (RandomForest) para (sensor_type, size).
+        """
+        if df is None or df.empty:
+            print(f"[SKIP] Sin datos para {sensor_type.upper()} size {size}")
+            return
 
-    def load_data(self, data_dir: str = 'data') -> Tuple[Optional[pd.DataFrame], Optional[pd.DataFrame]]:
-        try:
-            elf_files = os.listdir(os.path.join(data_dir, 'ELF'))
-            elf_data = []
-            for file in elf_files:
-                if file.endswith('.csv'):
-                    df = pd.read_csv(os.path.join(data_dir, 'ELF', file))
-                    elf_data.append(df)
-            data_elf = pd.concat(elf_data, ignore_index=True) if elf_data else None
+        print(f"\n=== ENTRENANDO {sensor_type.upper()} (size {size}) ===")
+        print(f"Forma del DataFrame: {df.shape}")
 
-            mag_files = os.listdir(os.path.join(data_dir, 'MAG'))
-            mag_data = []
-            for file in mag_files:
-                if file.endswith('.csv'):
-                    df = pd.read_csv(os.path.join(data_dir, 'MAG', file))
-                    mag_data.append(df)
-            data_mag = pd.concat(mag_data, ignore_index=True) if mag_data else None
+        # Verificar que exista la columna Label
+        if 'Label' not in df.columns:
+            print(f"[ERROR] Falta la columna 'Label' en {sensor_type.upper()} size {size}")
+            return
 
-            if data_elf is not None and data_mag is not None:
-                print(f"Data loaded - ELF shape: {data_elf.shape}, MAG shape: {data_mag.shape}")
-            return data_elf, data_mag
-        except Exception as e:
-            print(f"Error loading data: {e}")
-            return None, None
-        
+        # Features y Label
+        X = df.drop(columns=['Label','SampleID'], errors='ignore')
+        y = df['Label']
+
+        if y.nunique() < 2:
+            print(f"[SKIP] Solo {y.nunique()} clase(s) en {sensor_type.upper()} size {size}")
+            return
+
+        # Escalar con RobustScaler
+        scaler = RobustScaler()
+        X_scaled = scaler.fit_transform(X)
+        self.scalers[sensor_type][size] = scaler
+
+        # Split
+        X_train, X_test, y_train, y_test = train_test_split(
+            X_scaled, y, test_size=0.2, random_state=42, stratify=y
+        )
+
+        print(" - Entrenando RandomForestClassifier ...")
+        model = RandomForestClassifier(
+            n_estimators=100,
+            max_depth=None,
+            random_state=42
+        )
+        model.fit(X_train, y_train)
+
+        # Evaluación rápida
+        y_pred = model.predict(X_test)
+        print(">>> EVALUACIÓN <<<")
+        print(classification_report(y_test, y_pred))
+        print("Matriz de confusión:")
+        print(confusion_matrix(y_test, y_pred))
+
+        # Guardar en diccionario
+        self.models[sensor_type][size] = model
+    
+    ############################################################################
+    # ------------------- Guardado y Carga de Modelos/Scalers ------------------
+    ############################################################################
+    def save_models(self, base_dir='model'):
+        """
+        Guarda cada modelo y scaler en subcarpetas:
+          model/ELF/160, model/ELF/320, ...
+          model/MAG/160, model/MAG/320, ...
+        """
+        print("\n=== GUARDANDO MODELOS Y SCALERS ===")
+        for sensor_type in ['elf', 'mag']:
+            for size, model in self.models[sensor_type].items():
+                if model is None:
+                    continue
+                # Crear carpeta
+                folder = os.path.join(base_dir, sensor_type.upper(), str(size))
+                os.makedirs(folder, exist_ok=True)
+
+                model_path = os.path.join(folder, f"model_{sensor_type}_{size}.pkl")
+                scaler_path = os.path.join(folder, f"scaler_{sensor_type}_{size}.pkl")
+
+                # Guardar modelo
+                joblib.dump(model, model_path)
+
+                # Guardar scaler
+                scaler_obj = self.scalers[sensor_type][size]
+                joblib.dump(scaler_obj, scaler_path)
+
+                print(f"[OK] {sensor_type.upper()} size {size}:")
+                print(f"   Modelo :  {model_path}")
+                print(f"   Scaler :  {scaler_path}")
+
+        print("=== FIN GUARDADO ===\n")
+
+    def load_models(self, base_dir='model'):
+        """
+        Carga cada modelo y scaler desde las subcarpetas
+        model/ELF/160, model/ELF/320, 480, etc.
+        """
+        if not os.path.exists(base_dir):
+            print(f"No existe la carpeta {base_dir}. No se cargaron modelos.")
+            return
+
+        for sensor_type in ['elf','mag']:
+            sensor_folder = os.path.join(base_dir, sensor_type.upper())
+            if not os.path.exists(sensor_folder):
+                continue
+
+            for size_str in os.listdir(sensor_folder):
+                sub_path = os.path.join(sensor_folder, size_str)
+                if os.path.isdir(sub_path):
+                    try:
+                        size = int(size_str)
+                    except ValueError:
+                        continue  # si no es un entero, lo ignoramos
+
+                    model_path = os.path.join(sub_path, f"model_{sensor_type}_{size}.pkl")
+                    scaler_path = os.path.join(sub_path, f"scaler_{sensor_type}_{size}.pkl")
+
+                    if os.path.exists(model_path) and os.path.exists(scaler_path):
+                        print(f"Cargando {sensor_type.upper()} size {size} desde {sub_path}")
+                        loaded_model = joblib.load(model_path)
+                        loaded_scaler = joblib.load(scaler_path)
+                        self.models[sensor_type][size] = loaded_model
+                        self.scalers[sensor_type][size] = loaded_scaler
+    
+    ############################################################################
+    # ------------------ Preprocesar datos en fase de test ---------------------
+    ############################################################################
     def preprocess_data(self, data: pd.DataFrame, is_training: bool = True):
+        """
+        Si 'Label' está en columns, la separamos de X. 
+        Hacemos un escalado "temporal" con RobustScaler para la demo 
+        (en un caso real, usarías self.scalers[sensor][size] si sabes el size).
+        
+        Retorna (X_torch, lengths, y_torch) si hay Label, sino (X_torch, lengths).
+        """
+        import torch
+        from sklearn.preprocessing import RobustScaler
+
         if 'Label' in data.columns:
-            X = data.drop(['Label', 'SampleID'] if 'SampleID' in data.columns else ['Label'], axis=1)
+            X = data.drop(columns=['Label','SampleID'], errors='ignore')
             y = data['Label']
-            
-            if is_training:
-                smote = SMOTE(
-                    random_state=42,
-                    k_neighbors=3,
-                    sampling_strategy=0.5
-                )
-                X_resampled, y_resampled = smote.fit_resample(X, y)
-                X = pd.DataFrame(X_resampled, columns=X.columns)
-                y = pd.Series(y_resampled)
         else:
             X = data
             y = None
 
-        X = pd.DataFrame(self.scaler.fit_transform(X), columns=X.columns)
-        
-        # Convertir a tensor con dimensiones correctas
-        tensor_data = torch.FloatTensor(X.values)
-        tensor_data = tensor_data.unsqueeze(1)  # Agregar dimensión de secuencia
-        
-        lengths = torch.LongTensor([tensor_data.size(1)] * tensor_data.size(0))
-        
+        # Para fines de demostración, escalamos con un nuevo scaler.
+        # Idealmente, si supiéramos sensor & size, haríamos:
+        # scaler = self.scalers[sensor][size]
+        # X_scaled = scaler.transform(X)
+        X_scaled = RobustScaler().fit_transform(X)
+
+        X_torch = torch.FloatTensor(X_scaled)  # [N, features]
+        lengths = torch.LongTensor([X_torch.size(1)] * X_torch.size(0))
+
         if y is not None:
-            y = torch.LongTensor(y.values)
-            return tensor_data, lengths, y
-        return tensor_data, lengths
-
-    def train_model(self, X: torch.Tensor, lengths: torch.Tensor, y: torch.Tensor, 
-                sensor_type: str, epochs=150, batch_size=32):
-        if sensor_type == 'elf':
-            hidden_size = 256
-            num_layers = 4
-            class_weights = torch.FloatTensor([1.0, 8.0]).to(self.device)
+            y_torch = torch.LongTensor(y.values)
+            return X_torch, lengths, y_torch
         else:
-            hidden_size = 128
-            num_layers = 3
-            class_weights = self.calculate_class_weights(y).to(self.device)
-        
-        num_classes = len(torch.unique(y))
-        num_features = X.size(-1)
-        
-        print(f"Input features: {num_features}")
-        print(f"Batch size: {X.size(0)}")
-        print(f"Sequence length: {X.size(1)}")
-        
-        model = VariableLengthLSTM(
-            input_size=num_features,
-            hidden_size=hidden_size,
-            num_layers=num_layers,
-            num_classes=num_classes
-        ).to(self.device)
-        
-        criterion = nn.CrossEntropyLoss(weight=class_weights)
-        optimizer = torch.optim.AdamW(
-            model.parameters(),
-            lr=0.0003 if sensor_type == 'elf' else 0.001,
-            weight_decay=0.05 if sensor_type == 'elf' else 0.01
-        )
-        
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer,
-            mode='min',
-            factor=0.2 if sensor_type == 'elf' else 0.5,
-            patience=5 if sensor_type == 'elf' else 10,
-            verbose=True
-        )
-        
-        # Crear directorio para guardar modelos
-        save_dir = os.path.join('model', sensor_type.upper())
-        os.makedirs(save_dir, exist_ok=True)
-        best_model_path = os.path.join(save_dir, f'model_{sensor_type}.pth')
-        
-        best_loss = float('inf')
-        patience = 15
-        patience_counter = 0
-        
-        print(f"\nTraining {sensor_type} model...")
-        for epoch in tqdm(range(epochs)):
-            model.train()
-            optimizer.zero_grad()
-            
-            X_reshaped = X.to(self.device)
-            y = y.to(self.device)
-            
-            outputs = model(X_reshaped, lengths)
-            loss = criterion(outputs, y)
-            
-            loss.backward()
-            optimizer.step()
-            
-            scheduler.step(loss)
-            
-            if loss < best_loss:
-                best_loss = loss
-                patience_counter = 0
-                torch.save(model.state_dict(), best_model_path)
-            else:
-                patience_counter += 1
-                if patience_counter >= patience:
-                    print(f"Early stopping at epoch {epoch}")
-                    break
-        
-        model.load_state_dict(torch.load(best_model_path))
-        self.models[sensor_type] = model
-        return model
+            return X_torch, lengths
 
-    def evaluate_model(self, X_test: torch.Tensor, lengths_test: torch.Tensor, 
-                      y_test: torch.Tensor, sensor_type: str):
-        model = self.models[sensor_type]
-        model.eval()
-        
-        with torch.no_grad():
-            X_test = X_test.unsqueeze(-1).to(self.device)
-            outputs = model(X_test, lengths_test)
-            _, predicted = torch.max(outputs.data, 1)
-            
-        y_pred = predicted.cpu().numpy()
-        y_true = y_test.cpu().numpy()
-        
-        print(f"\nEvaluation results for {sensor_type}:")
-        print(classification_report(y_true, y_pred))
-        
-        plots_dir = os.path.join('train_plots', sensor_type.upper())
-        os.makedirs(plots_dir, exist_ok=True)
-        
-        plt.figure(figsize=(8, 6))
-        cm = confusion_matrix(y_true, y_pred)
-        sns.heatmap(cm, annot=True, fmt='d')
-        plt.title(f'Confusion Matrix - {sensor_type}')
-        plt.ylabel('True')
-        plt.xlabel('Predicted')
-        plt.savefig(os.path.join(plots_dir, f'confusion_matrix_{sensor_type}.png'))
-        plt.close()
 
-    def save_models(self, base_dir: str = 'model'):
-        for sensor_type in ['elf', 'mag']:
-            if self.models[sensor_type] is not None:
-                save_dir = os.path.join(base_dir, sensor_type.upper())
-                os.makedirs(save_dir, exist_ok=True)
-                torch.save(self.models[sensor_type].state_dict(), 
-                        os.path.join(save_dir, f'model_{sensor_type}.pth'))
-
-    def load_models(self, base_dir: str = 'model'):
-        for sensor_type in ['elf', 'mag']:
-            model_path = os.path.join(base_dir, sensor_type.upper(), f'model_{sensor_type}.pth')
-            if os.path.exists(model_path):
-                input_size = 1
-                hidden_size = 256 if sensor_type == 'elf' else 128
-                num_layers = 4 if sensor_type == 'elf' else 3
-                num_classes = 2
-                
-                self.models[sensor_type] = VariableLengthLSTM(
-                    input_size, hidden_size, num_layers, num_classes).to(self.device)
-                self.models[sensor_type].load_state_dict(
-                    torch.load(model_path, map_location=self.device))
-
+###############################################################################
+# Si quieres un main de ejemplo:
+###############################################################################
 def main():
-    pipeline = ModelPipeline()
-    
-    with tqdm(total=6, desc="Pipeline Progress") as pbar:
-        data_elf, data_mag = pipeline.load_data('data')
-        pbar.update(1)
-
-        if data_elf is None or data_mag is None:
-            print("Error loading data. Exiting...")
-            return
-
-        X_elf, lengths_elf, y_elf = pipeline.preprocess_data(data_elf)
-        X_mag, lengths_mag, y_mag = pipeline.preprocess_data(data_mag)
-        pbar.update(1)
-
-        X_train_elf, X_test_elf, y_train_elf, y_test_elf = train_test_split(
-            X_elf, y_elf, test_size=0.2, random_state=42, stratify=y_elf)
-        lengths_train_elf, lengths_test_elf, _, _ = train_test_split(
-            lengths_elf, lengths_elf, test_size=0.2, random_state=42)
-
-        X_train_mag, X_test_mag, y_train_mag, y_test_mag = train_test_split(
-            X_mag, y_mag, test_size=0.2, random_state=42, stratify=y_mag)
-        lengths_train_mag, lengths_test_mag, _, _ = train_test_split(
-            lengths_mag, lengths_mag, test_size=0.2, random_state=42)
-        pbar.update(1)
-
-        pipeline.train_model(X_train_elf, lengths_train_elf, y_train_elf, 'elf')
-        pbar.update(1)
-        
-        pipeline.train_model(X_train_mag, lengths_train_mag, y_train_mag, 'mag')
-        pbar.update(1)
-
-        pipeline.evaluate_model(X_test_elf, lengths_test_elf, y_test_elf, 'elf')
-        pipeline.evaluate_model(X_test_mag, lengths_test_mag, y_test_mag, 'mag')
-        pipeline.save_models('model')
-        pbar.update(1)
+    mp = ModelPipeline()
+    # Entrenamos y guardamos
+    mp.train_and_save_models(data_dir='data', model_out='model')
+    # Cargar (para comprobar)
+    mp.load_models('model')
 
 if __name__ == "__main__":
     main()
