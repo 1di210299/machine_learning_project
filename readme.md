@@ -1,100 +1,77 @@
-# README: How to Run the Machine Learning Training Code
+# Model Prediction and Testing Pipeline
 
-## Overview
-This README file explains how to run the code to train and evaluate the machine learning models for ELF and MAG sensor datasets. Follow these instructions to prepare the environment, execute the training process, and evaluate the model's performance.
+This document provides an overview of the system developed for predicting and testing machine learning models trained for binary classification tasks. The project focuses on automating processes such as training, testing, and generating predictions for new datasets.
 
----
+## Project Structure
 
-## Prerequisites
-### Software Requirements
-- Python 3.x installed on your system.
-- Required libraries:
-  - `pandas`
-  - `numpy`
-  - `scikit-learn`
-  - `imbalanced-learn`
-  - `matplotlib`
-  - `seaborn`
+### Directories
+- **model/**: Contains pre-trained models organized by sensor type (**ELF** and **MAG**) and data sizes (**160**, **320**, **480**).
+- **data_predictions/**: Input directory for new datasets to be analyzed.
+  - `data_predictions/ELF/160`
+  - `data_predictions/ELF/320`
+  - `data_predictions/ELF/480`
+  - `data_predictions/MAG/160`
+  - `data_predictions/MAG/320`
+  - `data_predictions/MAG/480`
+- **predictions/**: Output directory where the results of the predictions are saved. Organized similarly to `data_predictions` for ease of reference.
+- **test/**: Input directory for test datasets used to validate the models during testing.
 
-### Hardware Recommendations
-- At least 8 GB of RAM for handling large datasets.
-- A multi-core processor for faster training.
-- GPU support (optional) for faster processing when using large datasets.
+### Files
+- **model_pipeline.py**: Handles data preprocessing, model training, and loading.
+- **model_testing.py**: Tests the performance of the trained models using specified test datasets.
+- **model_prediction.py**: Generates predictions for new datasets using the trained models.
+- **requirements.txt**: Contains the list of Python dependencies required to run the project.
 
-### Input Data Requirements
-- CSV file format.
-- Columns:
-  - **Features**: 320 columns representing sensor data.
-  - **Label**: Binary column indicating event detection (1 for Yes, 0 for No).
+## Features
 
----
+### 1. Automated Prediction Pipeline
+The `model_prediction.py` script automates the process of generating predictions for new datasets:
+- It identifies and processes new data from the `data_predictions` directory.
+- Prepares the data for the models by cleaning unnecessary columns.
+- Generates predictions using the appropriate model based on the sensor type and size of the data.
+- Saves the predictions in the `predictions` directory in a structured manner.
 
-## Installation
-1. **Clone the Repository**
+### 2. Flexible Model Training and Testing
+The `model_pipeline.py` and `model_testing.py` scripts ensure that:
+- Models are trained and tested for different data sizes (**160**, **320**, **480**) and sensor types (**ELF** and **MAG**).
+- Test datasets can be loaded and evaluated with detailed performance metrics such as F1-scores and classification reports.
+- Cases with extreme values (e.g., all zeros or random noise) are tested to ensure model robustness.
+
+## Steps to Use
+
+### 1. Setup
+1. Install the required dependencies:
    ```bash
-   git clone <repository-url>
-   cd <repository-folder>
+   pip install -r requirements.txt
    ```
+2. Ensure the `model/` directory contains pre-trained models organized by sensor and size.
+3. Prepare input datasets in the `data_predictions/` directory, maintaining the folder structure.
 
-2. **Set Up the Environment**
-   - Create a virtual environment (optional but recommended):
-     ```bash
-     python -m venv env
-     source env/bin/activate   # On Windows: env\Scripts\activate
-     ```
-   - Install dependencies:
-     ```bash
-     pip install -r requirements.txt
-     ```
-
----
-
-## Running the Code
-### 1. Prepare Your Dataset
-- Place your CSV dataset in the `/data` folder (or update the file path in the script).
-- Ensure your data matches the required structure.
-
-### 2. Execute the Script
-Run the main training script:
+### 2. Running Predictions
+Run the `model_prediction.py` script to generate predictions:
 ```bash
-python train_model.py
+python model_prediction.py
 ```
+- Predictions will be saved in the `predictions/` directory.
+- Ensure the datasets in `data_predictions` match the required structure (index column, `SampleID`, and feature columns).
 
-### 3. Monitor the Output
-- The script will:
-  1. Load and preprocess the dataset.
-  2. Balance the classes using SMOTEENN.
-  3. Train and optimize the model.
-  4. Evaluate the model and display metrics such as accuracy, precision, and recall.
-  5. Save the trained model for future use.
+### 3. Testing Models
+Run the `model_testing.py` script to validate the performance of the models:
+```bash
+python model_testing.py
+```
+- The script will evaluate the models on datasets from the `test/` directory.
+- Results, including F1-scores and classification reports, are displayed in the terminal.
 
----
+### 4. Retraining Models
+Modify `model_pipeline.py` to add new training datasets and retrain models if necessary. Preprocessing and retraining scripts are already built into the pipeline.
 
-## Outputs
-1. **Model File**:
-   - Saved in the `/models` directory as `trained_model.joblib`.
+## Key Metrics
+- **F1-Score**: Measures the balance between precision and recall.
+  - ELF 320: **0.9910**
+  - MAG 320: **0.9968**
+- **Robustness**: Models handle edge cases like zeros, ones, and random noise effectively.
 
-2. **Performance Reports**:
-   - Classification report and confusion matrix displayed in the terminal.
-   - Graphical outputs saved in the `/outputs` folder.
-
----
-
-## Troubleshooting
-1. **Missing Libraries**:
-   - Ensure all required libraries are installed. Use:
-     ```bash
-     pip install -r requirements.txt
-     ```
-
-2. **Data Format Issues**:
-   - Ensure the input CSV matches the specified format.
-   - Use a data validation script if needed (can be provided on request).
-
-3. **Memory Errors**:
-   - Use a system with higher RAM or work with smaller batches of data.
-
----
-
-
+## Summary
+This project provides an end-to-end solution for training, testing, and predicting with machine learning models. The structured directories, automated scripts, and performance tracking ensure efficient handling of large datasets across different use cases.
 
