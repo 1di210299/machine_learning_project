@@ -1,77 +1,79 @@
-# Model Prediction and Testing Pipeline
+# Model Training and Prediction System for Sensor Data
 
-This document provides an overview of the system developed for predicting and testing machine learning models trained for binary classification tasks. The project focuses on automating processes such as training, testing, and generating predictions for new datasets.
+## Overview
+This system processes and analyzes sensor data (ELF and MAG) across different sizes (160, 320, 480) using machine learning models. It consists of three main components:
+- Model training pipeline
+- Model testing framework
+- Prediction system for new data
 
-## Project Structure
+## File Structure
+```
+project/
+├── model/                  # Trained models storage
+│   ├── ELF/
+│   │   ├── 160/
+│   │   ├── 320/
+│   │   └── 480/
+│   └── MAG/
+│       ├── 160/
+│       ├── 320/
+│       └── 480/
+├── data_predictions/       # Place new data here for predictions
+│   ├── ELF/
+│   │   ├── 160/
+│   │   ├── 320/
+│   │   └── 480/
+│   └── MAG/
+│       ├── 160/
+│       ├── 320/
+│       └── 480/
+├── predictions/           # Output folder for predictions
+├── model_pipeline.py
+├── model_prediction.py
+└── model_testing.py
+```
 
-### Directories
-- **model/**: Contains pre-trained models organized by sensor type (**ELF** and **MAG**) and data sizes (**160**, **320**, **480**).
-- **data_predictions/**: Input directory for new datasets to be analyzed.
-  - `data_predictions/ELF/160`
-  - `data_predictions/ELF/320`
-  - `data_predictions/ELF/480`
-  - `data_predictions/MAG/160`
-  - `data_predictions/MAG/320`
-  - `data_predictions/MAG/480`
-- **predictions/**: Output directory where the results of the predictions are saved. Organized similarly to `data_predictions` for ease of reference.
-- **test/**: Input directory for test datasets used to validate the models during testing.
+## Main Components
 
-### Files
-- **model_pipeline.py**: Handles data preprocessing, model training, and loading.
-- **model_testing.py**: Tests the performance of the trained models using specified test datasets.
-- **model_prediction.py**: Generates predictions for new datasets using the trained models.
-- **requirements.txt**: Contains the list of Python dependencies required to run the project.
+### model_pipeline.py
+- Core class for training models
+- Handles data loading and preprocessing
+- Trains Random Forest models for each sensor/size combination
+- Manages model saving and loading
 
-## Features
+### model_prediction.py
+- Used for making predictions on new data
+- Takes input from data_predictions folder
+- Generates predictions (0 or 1) for each case
+- Saves results in predictions folder
 
-### 1. Automated Prediction Pipeline
-The `model_prediction.py` script automates the process of generating predictions for new datasets:
-- It identifies and processes new data from the `data_predictions` directory.
-- Prepares the data for the models by cleaning unnecessary columns.
-- Generates predictions using the appropriate model based on the sensor type and size of the data.
-- Saves the predictions in the `predictions` directory in a structured manner.
+### model_testing.py
+- Used during development phase
+- Validates model performance
+- Not needed for regular usage
 
-### 2. Flexible Model Training and Testing
-The `model_pipeline.py` and `model_testing.py` scripts ensure that:
-- Models are trained and tested for different data sizes (**160**, **320**, **480**) and sensor types (**ELF** and **MAG**).
-- Test datasets can be loaded and evaluated with detailed performance metrics such as F1-scores and classification reports.
-- Cases with extreme values (e.g., all zeros or random noise) are tested to ensure model robustness.
+## How to Use
 
-## Steps to Use
-
-### 1. Setup
-1. Install the required dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-2. Ensure the `model/` directory contains pre-trained models organized by sensor and size.
-3. Prepare input datasets in the `data_predictions/` directory, maintaining the folder structure.
-
-### 2. Running Predictions
-Run the `model_prediction.py` script to generate predictions:
-```bash
+### For Predictions on New Data:
+1. Place your new data files in the appropriate folders under `data_predictions/`
+2. Run:
+```python
 python model_prediction.py
 ```
-- Predictions will be saved in the `predictions/` directory.
-- Ensure the datasets in `data_predictions` match the required structure (index column, `SampleID`, and feature columns).
+3. Find results in the `predictions/` folder
 
-### 3. Testing Models
-Run the `model_testing.py` script to validate the performance of the models:
-```bash
-python model_testing.py
-```
-- The script will evaluate the models on datasets from the `test/` directory.
-- Results, including F1-scores and classification reports, are displayed in the terminal.
+## Notes
+- The system uses RobustScaler for data normalization
+- Models are trained separately for each sensor type (ELF/MAG) and size (160/320/480)
+- Predictions are binary (0 or 1)
 
-### 4. Retraining Models
-Modify `model_pipeline.py` to add new training datasets and retrain models if necessary. Preprocessing and retraining scripts are already built into the pipeline.
+## Requirements
+- Python 3.x
+- scikit-learn
+- pandas
+- numpy
+- torch
+- joblib
 
-## Key Metrics
-- **F1-Score**: Measures the balance between precision and recall.
-  - ELF 320: **0.9910**
-  - MAG 320: **0.9968**
-- **Robustness**: Models handle edge cases like zeros, ones, and random noise effectively.
-
-## Summary
-This project provides an end-to-end solution for training, testing, and predicting with machine learning models. The structured directories, automated scripts, and performance tracking ensure efficient handling of large datasets across different use cases.
-
+## Support
+For any issues or questions, please contact the development team.
