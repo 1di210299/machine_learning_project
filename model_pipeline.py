@@ -2,292 +2,301 @@ import os
 import joblib
 import pandas as pd
 import numpy as np
-
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import train_test_split
+from xgboost import XGBClassifier
+import warnings
+from sklearn.model_selection import train_test_split, StratifiedKFold
 from sklearn.preprocessing import RobustScaler
-from sklearn.metrics import classification_report, confusion_matrix
+from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score
+from sklearn.metrics import precision_recall_curve, auc, f1_score
+from sklearn.calibration import CalibratedClassifierCV
+from imblearn.over_sampling import SMOTE
+from imblearn.under_sampling import RandomUnderSampler
+from imblearn.pipeline import Pipeline as ImbPipeline
+from scipy import stats, signal
 
-import torch
+warnings.filterwarnings('ignore', category=UserWarning)
 
-###############################################################################
-# Main Class: ModelPipeline
-###############################################################################
 class ModelPipeline:
     def __init__(self):
-        """
-        Here we store models and scalers in dictionaries for
-        each (sensor, size) pair, for example:
-          self.models['elf'][160]
-          self.models['mag'][320]
-          etc.
-        """
-        self.models = {
-            'elf': {},
-            'mag': {}
-        }
-        self.scalers = {
-            'elf': {},
-            'mag': {}
-        }
-        # For PyTorch models (LSTM, etc.), we define a device.
-        # If you're only using sklearn, this isn't essential.
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    
-    ############################################################################
-    # ------------------------- Load data from subfolders ----------------------
-    ############################################################################
-    def load_data_subfolders(self, base_dir='data'):
-        """
-        Expected structure:
-          data/
-           ├─ ELF/
-           │   ├─ 160/ (multiple .csv files)
-           │   ├─ 320/
-           │   └─ 480/
-           ├─ MAG/
-           │   ├─ 160/
-           │   ├─ 320/
-           │   └─ 480/
-
-        Returns a dict:
-          {
-            160: (df_elf_160, df_mag_160),
-            320: (df_elf_320, df_mag_320),
-            480: (df_elf_480, df_mag_480)
-          }
-
-        Each resulting DataFrame is the concatenation of all .csv files 
-        found in those subfolders.
-        """
-        sizes = [160, 320, 480]
-        data_dict = {}
-
-        print("\n=== LOADING DATA FROM SUBFOLDERS ===")
-        for size in sizes:
-            elf_path = os.path.join(base_dir, 'ELF', str(size))
-            mag_path = os.path.join(base_dir, 'MAG', str(size))
-
-            # ELF
-            elf_dfs = []
-            if os.path.exists(elf_path):
-                csv_elf = [f for f in os.listdir(elf_path) if f.endswith('.csv')]
-                print(f"[ELF][{size}] CSV files found: {len(csv_elf)}")
-                for csv_file in csv_elf:
-                    full_path = os.path.join(elf_path, csv_file)
-                    print(f"   Reading {full_path}")
-                    df_tmp = pd.read_csv(full_path)
-                    elf_dfs.append(df_tmp)
-                df_elf = pd.concat(elf_dfs, ignore_index=True) if elf_dfs else None
-            else:
-                print(f"[ELF][{size}] Folder doesn't exist: {elf_path}")
-                df_elf = None
-
-            # MAG
-            mag_dfs = []
-            if os.path.exists(mag_path):
-                csv_mag = [f for f in os.listdir(mag_path) if f.endswith('.csv')]
-                print(f"[MAG][{size}] CSV files found: {len(csv_mag)}")
-                for csv_file in csv_mag:
-                    full_path = os.path.join(mag_path, csv_file)
-                    print(f"   Reading {full_path}")
-                    df_tmp = pd.read_csv(full_path)
-                    mag_dfs.append(df_tmp)
-                df_mag = pd.concat(mag_dfs, ignore_index=True) if mag_dfs else None
-            else:
-                print(f"[MAG][{size}] Folder doesn't exist: {mag_path}")
-                df_mag = None
-
-            data_dict[size] = (df_elf, df_mag)
-
-        print("=== DATA LOADING COMPLETE ===\n")
-        return data_dict
-    
-    ############################################################################
-    # --------------------------- Train and save -------------------------------
-    ############################################################################
-    def train_and_save_models(self, data_dir='data', model_out='model'):
-        """
-        1) Loads data from subfolders (ELF/160, MAG/160, etc.).
-        2) Trains a RandomForest for each (sensor, size).
-        3) Saves models and scalers in model_out/ELF/160, etc.
-        """
-        data_dict = self.load_data_subfolders(data_dir)
-
-        for size, (df_elf, df_mag) in data_dict.items():
-            print(f"\n--- PROCESSING SIZE: {size} ---")
-            # Train for ELF
-            self.train_model(df_elf, 'elf', size)
-            # Train for MAG
-            self.train_model(df_mag, 'mag', size)
+        self.models = {'elf': {}, 'mag': {}}
+        self.scalers = {'elf': {}, 'mag': {}}
+        self.feature_extractors = {'elf': {}, 'mag': {}}
+        self.optimal_thresholds = {'elf': {}, 'mag': {}}
         
-        # Save
-        self.save_models(model_out)
-    
+    def extract_sequence_features(self, data):
+        """Extrae características de la secuencia temporal"""
+        # Asegurar que no hay NaN
+        data = pd.Series(data).interpolate(method='linear', limit_direction='both').values
+        
+        return {
+            'max_value': np.max(data),
+            'min_value': np.min(data),
+            'peak_to_peak': np.max(data) - np.min(data),
+            'mean': np.mean(data),
+            'std': np.std(data),
+            'skewness': stats.skew(data),
+            'kurtosis': stats.kurtosis(data),
+            'zero_crossings': len(np.where(np.diff(np.signbit(data)))[0]),
+            'gradient_max': np.max(np.gradient(data)),
+            'gradient_min': np.min(np.gradient(data)),
+            'peak_value': np.max(np.abs(data)),
+        'valley_value': np.min(np.abs(data)),
+        'peak_to_valley_ratio': np.max(np.abs(data)) / (np.min(np.abs(data)) + 1e-6),
+        'energy_ratio': np.sum(data**2) / len(data)
+        }
+        
+
+    def segment_features(self, data, segment_size=40):
+        """Extrae características por segmentos"""
+        # Asegurar que no hay NaN
+        data = pd.Series(data).interpolate(method='linear', limit_direction='both').values
+        
+        segments = np.array_split(data, len(data)//segment_size)
+        features = {}
+        for i, segment in enumerate(segments):
+            features.update({
+                f'segment_{i}_mean': np.mean(segment),
+                f'segment_{i}_std': np.std(segment),
+                f'segment_{i}_max': np.max(segment),
+                f'segment_{i}_min': np.min(segment),
+                f'segment_{i}_peak_to_peak': np.max(segment) - np.min(segment)
+            })
+        return features
+
+    def preprocess_data(self, df):
+        """Preprocesa los datos extrayendo características y maneja valores NaN"""
+        feature_list = []
+        
+        # Primero, limpiar NaN en el DataFrame completo
+        df_cleaned = df.fillna(method='ffill').fillna(method='bfill')
+        
+        for _, row in df_cleaned.iterrows():
+            data = row[[f'Data_{i}' for i in range(320)]].values
+            
+            features = {}
+            try:
+                features.update(self.extract_sequence_features(data))
+                features.update(self.segment_features(data))
+            except Exception as e:
+                print(f"Error procesando fila: {e}")
+                # Valores por defecto en caso de error
+                features = {
+                    'max_value': 0.0,
+                    'min_value': 0.0,
+                    'peak_to_peak': 0.0,
+                    'mean': 0.0,
+                    'std': 0.0,
+                    'skewness': 0.0,
+                    'kurtosis': 0.0,
+                    'zero_crossings': 0,
+                    'gradient_max': 0.0,
+                    'gradient_min': 0.0
+                }
+                for i in range(8):
+                    features.update({
+                        f'segment_{i}_mean': 0.0,
+                        f'segment_{i}_std': 0.0,
+                        f'segment_{i}_max': 0.0,
+                        f'segment_{i}_min': 0.0,
+                        f'segment_{i}_peak_to_peak': 0.0
+                    })
+            
+            feature_list.append(features)
+        
+        # Crear DataFrame y manejar cualquier NaN restante
+        features_df = pd.DataFrame(feature_list)
+        features_df = features_df.fillna(features_df.median())
+        
+        # Verificación final
+        if features_df.isna().any().any():
+            print("Advertencia: Rellenando valores NaN restantes con 0")
+            features_df = features_df.fillna(0)
+        
+        return features_df
+
+    def balance_dataset(self, X, y, method='hybrid'):
+        """Balance mejorado del dataset con manejo de NaN"""
+        # Verificar y limpiar NaN
+        if isinstance(X, np.ndarray) and np.isnan(X).any():
+            X = pd.DataFrame(X).fillna(pd.DataFrame(X).median()).values
+        
+        if method == 'hybrid':
+            try:
+                over = SMOTE(sampling_strategy=0.7, random_state=42)
+                under = RandomUnderSampler(sampling_strategy=0.8, random_state=42)
+                pipeline = ImbPipeline([('over', over), ('under', under)])
+                X_resampled, y_resampled = pipeline.fit_resample(X, y)
+                return X_resampled, y_resampled
+            except Exception as e:
+                print(f"Error en el balanceo: {e}")
+                return X, y
+        return X, y
+
+    def find_optimal_threshold(self, y_true, y_prob):
+        """Encuentra el umbral óptimo usando F1-score"""
+        thresholds = np.linspace(0.01, 0.9, 100)
+        f1_scores = []
+        
+        for threshold in thresholds:
+            y_pred = (y_prob >= threshold).astype(int)
+            f1 = f1_score(y_true, y_pred)
+            f1_scores.append(f1)
+            
+        return thresholds[np.argmax(f1_scores)]
+
     def train_model(self, df, sensor_type, size):
-        """
-        Trains a model (RandomForest) for (sensor_type, size).
-        """
-        if df is None or df.empty:
-            print(f"[SKIP] No data for {sensor_type.upper()} size {size}")
-            return
+        print(f"\n=== ENTRENANDO {sensor_type.upper()} (tamaño {size}) ===")
+        print(f"Dimensiones DataFrame: {df.shape}")
 
-        print(f"\n=== TRAINING {sensor_type.upper()} (size {size}) ===")
-        print(f"DataFrame shape: {df.shape}")
+        # Verificar y limpiar NaN en datos originales
+        if df.isna().any().any():
+            print("Limpiando valores NaN en datos de entrada...")
+            df = df.fillna(method='ffill').fillna(method='bfill')
 
-        # Verify Label column exists
-        if 'Label' not in df.columns:
-            print(f"[ERROR] Missing 'Label' column in {sensor_type.upper()} size {size}")
-            return
-
-        # Features and Label
-        X = df.drop(columns=['Label','SampleID'], errors='ignore')
+        # Preparar datos
+        print("\nPreprocesando datos...")
+        X = self.preprocess_data(df)
         y = df['Label']
 
-        if y.nunique() < 2:
-            print(f"[SKIP] Only {y.nunique()} class(es) in {sensor_type.upper()} size {size}")
-            return
+        print(f"Características extraídas: {X.shape[1]}")
 
-        # Scale with RobustScaler
+        # División de datos
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.2, stratify=y, random_state=42
+        )
+
+        print("\nDistribución de clases:")
+        print("Train:", pd.Series(y_train).value_counts(normalize=True))
+        print("Test:", pd.Series(y_test).value_counts(normalize=True))
+
+        # Escalado
         scaler = RobustScaler()
-        X_scaled = scaler.fit_transform(X)
+        X_train_scaled = scaler.fit_transform(X_train)
+        X_test_scaled = scaler.transform(X_test)
         self.scalers[sensor_type][size] = scaler
 
-        # Split
-        X_train, X_test, y_train, y_test = train_test_split(
-            X_scaled, y, test_size=0.2, random_state=42, stratify=y
-        )
+        # Balanceo
+        print("\nBalanceando dataset...")
+        X_balanced, y_balanced = self.balance_dataset(X_train_scaled, y_train)
 
-        print(" - Training RandomForestClassifier ...")
-        model = RandomForestClassifier(
-            n_estimators=100,
-            max_depth=None,
+        # Entrenamiento
+        print("\nEntrenando modelo...")
+        model = XGBClassifier(
+            max_depth=4,
+            learning_rate=0.1,
+            n_estimators=200,
+            min_child_weight=2,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            scale_pos_weight=3,
             random_state=42
         )
-        model.fit(X_train, y_train)
 
-        # Quick evaluation
-        y_pred = model.predict(X_test)
-        print(">>> EVALUATION <<<")
+        # Calibración
+        print("Calibrando modelo...")
+        calibrated_model = CalibratedClassifierCV(
+            model, cv=5, method='sigmoid'
+        )
+        calibrated_model.fit(X_balanced, y_balanced)
+
+        # Evaluación
+        print("\nEvaluando modelo...")
+        y_prob = calibrated_model.predict_proba(X_test_scaled)[:, 1]
+        
+        # Encontrar umbral óptimo
+        threshold = self.find_optimal_threshold(y_test, y_prob)
+        self.optimal_thresholds[sensor_type][size] = threshold
+        print(f"\nUmbral óptimo: {threshold:.3f}")
+
+        # Predicciones finales
+        y_pred = (y_prob >= threshold).astype(int)
+
+        # Métricas
+        print("\n=== MÉTRICAS DE EVALUACIÓN ===")
         print(classification_report(y_test, y_pred))
-        print("Confusion matrix:")
-        print(confusion_matrix(y_test, y_pred))
 
-        # Save in dictionary
-        self.models[sensor_type][size] = model
-    
-    ############################################################################
-    # ------------------- Save and Load Models/Scalers -------------------------
-    ############################################################################
+        # Matriz de confusión
+        tn, fp, fn, tp = confusion_matrix(y_test, y_pred).ravel()
+        print("\nMatriz de confusión:")
+        print(f"Verdaderos Negativos: {tn}")
+        print(f"Falsos Positivos: {fp}")
+        print(f"Falsos Negativos: {fn}")
+        print(f"Verdaderos Positivos: {tp}")
+
+        # ROC y PR curves
+        precision, recall, _ = precision_recall_curve(y_test, y_prob)
+        print(f"\nPrecision-Recall AUC: {auc(recall, precision):.3f}")
+        print(f"ROC AUC: {roc_auc_score(y_test, y_prob):.3f}")
+
+        # Guardar modelo
+        self.models[sensor_type][size] = calibrated_model
+
     def save_models(self, base_dir='model'):
-        """
-        Saves each model and scaler in subfolders:
-          model/ELF/160, model/ELF/320, ...
-          model/MAG/160, model/MAG/320, ...
-        """
-        print("\n=== SAVING MODELS AND SCALERS ===")
+        print("\n=== GUARDANDO MODELOS Y CONFIGURACIÓN ===")
         for sensor_type in ['elf', 'mag']:
             for size, model in self.models[sensor_type].items():
                 if model is None:
                     continue
-                # Create folder
+                
                 folder = os.path.join(base_dir, sensor_type.upper(), str(size))
                 os.makedirs(folder, exist_ok=True)
 
                 model_path = os.path.join(folder, f"model_{sensor_type}_{size}.pkl")
                 scaler_path = os.path.join(folder, f"scaler_{sensor_type}_{size}.pkl")
+                config_path = os.path.join(folder, f"config_{sensor_type}_{size}.pkl")
 
-                # Save model
+                # Guardar modelo y configuración
                 joblib.dump(model, model_path)
+                joblib.dump(self.scalers[sensor_type][size], scaler_path)
+                
+                config = {
+                    'optimal_threshold': self.optimal_thresholds[sensor_type][size]
+                }
+                joblib.dump(config, config_path)
 
-                # Save scaler
-                scaler_obj = self.scalers[sensor_type][size]
-                joblib.dump(scaler_obj, scaler_path)
+                print(f"[OK] {sensor_type.upper()} tamaño {size}:")
+                print(f"   Modelo     : {model_path}")
+                print(f"   Escalador  : {scaler_path}")
+                print(f"   Config     : {config_path}")
 
-                print(f"[OK] {sensor_type.upper()} size {size}:")
-                print(f"   Model  :  {model_path}")
-                print(f"   Scaler :  {scaler_path}")
-
-        print("=== SAVING COMPLETE ===\n")
+        print("=== GUARDADO COMPLETO ===\n")
 
     def load_models(self, base_dir='model'):
-        """
-        Loads each model and scaler from subfolders
-        model/ELF/160, model/ELF/320, 480, etc.
-        """
-        if not os.path.exists(base_dir):
-            print(f"Directory {base_dir} doesn't exist. No models loaded.")
-            return
+        print("\nCargando modelos...")
+        for sensor_type in ['elf', 'mag']:
+            for size in [160, 320, 480]:
+                folder = os.path.join(base_dir, sensor_type.upper(), str(size))
+                if not os.path.exists(folder):
+                    continue
 
-        for sensor_type in ['elf','mag']:
-            sensor_folder = os.path.join(base_dir, sensor_type.upper())
-            if not os.path.exists(sensor_folder):
-                continue
+                model_path = os.path.join(folder, f"model_{sensor_type}_{size}.pkl")
+                scaler_path = os.path.join(folder, f"scaler_{sensor_type}_{size}.pkl")
+                config_path = os.path.join(folder, f"config_{sensor_type}_{size}.pkl")
 
-            for size_str in os.listdir(sensor_folder):
-                sub_path = os.path.join(sensor_folder, size_str)
-                if os.path.isdir(sub_path):
-                    try:
-                        size = int(size_str)
-                    except ValueError:
-                        continue  # skip if not an integer
+                if all(os.path.exists(p) for p in [model_path, scaler_path, config_path]):
+                    self.models[sensor_type][size] = joblib.load(model_path)
+                    self.scalers[sensor_type][size] = joblib.load(scaler_path)
+                    config = joblib.load(config_path)
+                    self.optimal_thresholds[sensor_type][size] = config['optimal_threshold']
+                    print(f"Cargado {sensor_type.upper()} tamaño {size}")
 
-                    model_path = os.path.join(sub_path, f"model_{sensor_type}_{size}.pkl")
-                    scaler_path = os.path.join(sub_path, f"scaler_{sensor_type}_{size}.pkl")
-
-                    if os.path.exists(model_path) and os.path.exists(scaler_path):
-                        print(f"Loading {sensor_type.upper()} size {size} from {sub_path}")
-                        loaded_model = joblib.load(model_path)
-                        loaded_scaler = joblib.load(scaler_path)
-                        self.models[sensor_type][size] = loaded_model
-                        self.scalers[sensor_type][size] = loaded_scaler
-    
-    ############################################################################
-    # ------------------ Preprocess data in test phase ------------------------
-    ############################################################################
-    def preprocess_data(self, data: pd.DataFrame, is_training: bool = True):
-        """
-        If 'Label' is in columns, we separate it from X.
-        We do a "temporary" scaling with RobustScaler for demo purposes
-        (in a real case, you'd use self.scalers[sensor][size] if you know the size).
-        
-        Returns (X_torch, lengths, y_torch) if Label exists, else (X_torch, lengths).
-        """
-        import torch
-        from sklearn.preprocessing import RobustScaler
-
-        if 'Label' in data.columns:
-            X = data.drop(columns=['Label','SampleID'], errors='ignore')
-            y = data['Label']
-        else:
-            X = data
-            y = None
-
-        # For demonstration purposes, we scale with a new scaler.
-        # Ideally, if we knew sensor & size, we would do:
-        # scaler = self.scalers[sensor][size]
-        # X_scaled = scaler.transform(X)
-        X_scaled = RobustScaler().fit_transform(X)
-
-        X_torch = torch.FloatTensor(X_scaled)  # [N, features]
-        lengths = torch.LongTensor([X_torch.size(1)] * X_torch.size(0))
-
-        if y is not None:
-            y_torch = torch.LongTensor(y.values)
-            return X_torch, lengths, y_torch
-        else:
-            return X_torch, lengths
-
-
-###############################################################################
-# Example main if needed:
-###############################################################################
 def main():
     mp = ModelPipeline()
-    # Train and save
-    mp.train_and_save_models(data_dir='data', model_out='model')
-    # Load (to verify)
-    mp.load_models('model')
+    
+    # Cargar datos
+    print("Cargando datos...")
+    data_dir = 'data'
+    
+    for sensor_type in ['ELF', 'MAG']:
+        for size in [320]:  # Solo procesamos tamaño 320 según los datos disponibles
+            csv_path = os.path.join(data_dir, sensor_type, str(size), 
+                                  f'passages_export_{sensor_type}.csv')
+            if os.path.exists(csv_path):
+                df = pd.read_csv(csv_path)
+                mp.train_model(df, sensor_type.lower(), size)
+    
+    # Guardar modelos
+    mp.save_models()
 
 if __name__ == "__main__":
     main()
